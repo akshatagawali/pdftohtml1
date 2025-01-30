@@ -8,204 +8,211 @@ from azure.core.credentials import AzureKeyCredential
 import base64
 
 
+class PDFToHTMLConverter:
+    def __init__(self, endpoint: str, key: str):
+        self.client = DocumentAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+        self.html_template = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>PDF to HTML Conversion</title>
+            <style>
+                .page { margin: 20px; padding: 20px; border: 1px solid #ccc; }
+                .text-line { margin: 5px 0; }
+                table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+                table, th, td { border: 1px solid #000; }
+                th, td { padding: 8px; text-align: left; }
+                img { max-width: 100%; height: auto; margin: 10px 0; }
+            </style>
+        </head>
+        <body>
+            {content}
+        </body>
+        </html>
+        """
 
-html_template = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>PDF to HTML Conversion</title>
-    <style>
-        
-    </style>
-</head>
-<body>
-    {content}
-</body>
-</html>
-"""
+    def _safe_escape(self, content: Any) -> str:
+        """Safely escape HTML content"""
+        try:
+            return html.escape(str(content).strip()) if content is not None else ""
+        except Exception as e:
+            print(f"Error escaping content: {e}")
+            return f"[Error processing content] {str(content)}"
 
-def _safe_escape(self, content: Any) -> str:
-    """Safely escape HTML content"""
-    try:
-        return html.escape(str(content).strip()) if content is not None else ""
-    except Exception as e:
-        print(f"Error escaping content: {e}")
-        return f"[Error processing content] {str(content)}"
+    def extract_images(self, pdf_path: str) -> List[List[str]]:
+        """Extract images from a PDF using PyMuPDF and return as Base64-encoded strings"""
+        images_per_page = []
 
-def extract_images(self, pdf_path: str) -> List[List[str]]:
-    """Extract images from a PDF using PyMuPDF and return as Base64-encoded strings"""
-    images_per_page = []
+        try:
+            pdf_document = fitz.open(pdf_path)
+            for page_number in range(len(pdf_document)):
+                page = pdf_document[page_number]
+                images = []
 
-    try:
-        pdf_document = fitz.open(pdf_path)
-        for page_number in range(len(pdf_document)):
-            page = pdf_document[page_number]
-            images = []
+                # Extract images from the page
+                for img_index, img in enumerate(page.get_images(full=True)):
+                    xref = img[0]
+                    base_image = pdf_document.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image_format = base_image["ext"]
+                    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                    images.append(f"data:image/{image_format};base64,{image_base64}")
 
-            # Extract images from the page
-            for img_index, img in enumerate(page.get_images(full=True)):
-                xref = img[0]
-                base_image = pdf_document.extract_image(xref)
-                image_bytes = base_image["image"]
-                image_format = base_image["ext"]
-                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                images.append(f"data:image/{image_format};base64,{image_base64}")
+                images_per_page.append(images)
 
-            images_per_page.append(images)
+            return images_per_page
 
-        return images_per_page
+        except Exception as e:
+            print(f"Error extracting images: {e}")
+            traceback.print_exc()
+            return []
 
-    except Exception as e:
-        print(f"Error extracting images: {e}")
-        traceback.print_exc()
-        return []
+    def extract_content(self, pdf_path: str) -> List[Dict[str, Any]]:
+        """Extract text lines, tables, and images from PDF"""
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
-def extract_content(self, pdf_path: str) -> List[Dict[str, Any]]:
-    """Extract text lines, tables, and images from PDF"""
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+        try:
+            with open(pdf_path, "rb") as pdf_file:
+                poller = self.client.begin_analyze_document("prebuilt-layout", document=pdf_file)
+                result = poller.result()
 
-    try:
-        with open(pdf_path, "rb") as pdf_file:
-            poller = self.client.begin_analyze_document("prebuilt-layout", document=pdf_file)
-            result = poller.result()
+            pages_content = [{"text": [], "tables": [], "images": []} for _ in range(len(result.pages))]
 
-        pages_content = [{"text": [], "tables": [], "images": []} for _ in range(len(result.pages))]
-
-        # Extract text lines (excluding table and image content)
-        for page_number, page in enumerate(result.pages):
-            # Collect areas occupied by tables and images
-            blocked_areas = []
-            for table in result.tables:
-                if table.bounding_regions and table.bounding_regions[0].page_number - 1 == page_number:
-                    blocked_areas.append((
-                        table.bounding_regions[0].polygon[0].x,
-                        table.bounding_regions[0].polygon[0].y,
-                        abs(table.bounding_regions[0].polygon[2].x - table.bounding_regions[0].polygon[0].x),
-                        abs(table.bounding_regions[0].polygon[2].y - table.bounding_regions[0].polygon[0].y)
-                    ))
+            # Extract text lines (excluding table and image content)
+            for page_number, page in enumerate(result.pages):
+                # Collect areas occupied by tables and images
+                blocked_areas = []
+                for table in result.tables:
+                    if table.bounding_regions and table.bounding_regions[0].page_number - 1 == page_number:
+                        blocked_areas.append((
+                            table.bounding_regions[0].polygon[0].x,
+                            table.bounding_regions[0].polygon[0].y,
+                            abs(table.bounding_regions[0].polygon[2].x - table.bounding_regions[0].polygon[0].x),
+                            abs(table.bounding_regions[0].polygon[2].y - table.bounding_regions[0].polygon[0].y)
+                        ))
                 
-            # Extract text lines that don't overlap with tables or images
-            text_lines = []
-            for line in page.lines:
-                # Use polygon method for position
-                line_poly = line.polygon
-                if line_poly and len(line_poly) >= 3:
-                    line_x = line_poly[0].x
-                    line_y = line_poly[0].y
-                    line_width = abs(line_poly[2].x - line_poly[0].x)
-                    line_height = abs(line_poly[2].y - line_poly[0].y)
+                # Extract text lines that don't overlap with tables or images
+                text_lines = []
+                for line in page.lines:
+                    # Use polygon method for position
+                    line_poly = line.polygon
+                    if line_poly and len(line_poly) >= 3:
+                        line_x = line_poly[0].x
+                        line_y = line_poly[0].y
+                        line_width = abs(line_poly[2].x - line_poly[0].x)
+                        line_height = abs(line_poly[2].y - line_poly[0].y)
 
-                    # Check if line overlaps with any blocked area
-                    is_blocked = any(
-                        self._lines_overlap(line_x, line_y, line_width, line_height, blocked_area)
-                        for blocked_area in blocked_areas
-                    )
-                    if not is_blocked:
-                        text_lines.append(line.content)
+                        # Check if line overlaps with any blocked area
+                        is_blocked = any(
+                            self._lines_overlap(line_x, line_y, line_width, line_height, blocked_area)
+                            for blocked_area in blocked_areas
+                        )
+                        if not is_blocked:
+                            text_lines.append(line.content)
+                
+                pages_content[page_number]["text"] = text_lines
+
+            # Extract tables separately
+            for table in result.tables:
+                if table.bounding_regions:
+                    page_number = table.bounding_regions[0].page_number - 1
+                    unique_columns = len(set(cell.column_index for cell in table.cells))
+                    table_data = []
+                    for row_index in range(max(cell.row_index for cell in table.cells) + 1):
+                        row_data = [""] * unique_columns
+                        for cell in table.cells:
+                            if cell.row_index == row_index:
+                                row_data[cell.column_index] = cell.content or ""
+                        table_data.append(row_data)
+                    pages_content[page_number]["tables"].append(table_data)
+
+            # Extract images separately
+            images_per_page = self.extract_images(pdf_path)
+            for page_number, images in enumerate(images_per_page):
+                pages_content[page_number]["images"].extend(images)
+
+            return pages_content
+
+        except Exception as e:
+            print(f"Error extracting PDF content: {e}")
+            traceback.print_exc()
+            return []
+
+    def _lines_overlap(self, line_x, line_y, line_width, line_height, blocked_area):
+        """Check if a text line's region overlaps with a blocked area"""
+        try:
+            # Unpack blocked area
+            bx, by, bw, bh = blocked_area
             
-            pages_content[page_number]["text"] = text_lines
+            # Check for overlap
+            return not (
+                line_x + line_width < bx or  # line is left of blocked area
+                line_x > bx + bw or  # line is right of blocked area
+                line_y + line_height < by or  # line is above blocked area
+                line_y > by + bh     # line is below blocked area
+            )
+        except Exception as e:
+            print(f"Error checking line overlap: {e}")
+            return False
 
-        # Extract tables separately
-        for table in result.tables:
-            if table.bounding_regions:
-                page_number = table.bounding_regions[0].page_number - 1
-                unique_columns = len(set(cell.column_index for cell in table.cells))
-                table_data = []
-                for row_index in range(max(cell.row_index for cell in table.cells) + 1):
-                    row_data = [""] * unique_columns
-                    for cell in table.cells:
-                        if cell.row_index == row_index:
-                            row_data[cell.column_index] = cell.content or ""
-                    table_data.append(row_data)
-                pages_content[page_number]["tables"].append(table_data)
+    def convert_to_html(self, pages_content: List[Dict[str, Any]], output_path: str):
+        """Convert extracted content to HTML"""
+        try:
+            html_content = ""
 
-        # Extract images separately
-        images_per_page = self.extract_images(pdf_path)
-        for page_number, images in enumerate(images_per_page):
-            pages_content[page_number]["images"].extend(images)
+            for page_index, page in enumerate(pages_content, 1):
+                page_html = f'<div class="page" id="page-{page_index}">\n'
+                page_html += f'<h2>Page {page_index}</h2>\n'
 
-        return pages_content
+                # Add text lines
+                for text_line in page.get("text", []):
+                    page_html += f'<div class="text-line">{self._safe_escape(text_line)}</div>\n'
 
-    except Exception as e:
-        print(f"Error extracting PDF content: {e}")
-        traceback.print_exc()
-        return []
+                # Add tables
+                for table_index, table in enumerate(page.get("tables", []), 1):
+                    if not table:
+                        continue
+                    page_html += f"<h3>Table {table_index}</h3>\n<table>\n"
+                    for row in table:
+                        page_html += "<tr>\n"
+                        for cell in row:
+                            page_html += f"<td>{self._safe_escape(cell)}</td>\n"
+                        page_html += "</tr>\n"
+                    page_html += "</table>\n"
 
-def _lines_overlap(self, line_x, line_y, line_width, line_height, blocked_area):
-    """Check if a text line's region overlaps with a blocked area"""
-    try:
-        # Unpack blocked area
-        bx, by, bw, bh = blocked_area
-        
-        # Check for overlap
-        return not (
-            line_x + line_width < bx or  # line is left of blocked area
-            line_x > bx + bw or  # line is right of blocked area
-            line_y + line_height < by or  # line is above blocked area
-            line_y > by + bh     # line is below blocked area
-        )
-    except Exception as e:
-        print(f"Error checking line overlap: {e}")
-        return False
+                # Add images
+                for img_index, img in enumerate(page.get("images", [])):
+                    page_html += f'<img src="{img}" alt="Image {img_index + 1} on Page {page_index}">\n'
 
-def convert_to_html(self, pages_content: List[Dict[str, Any]], output_path: str):
-    """Convert extracted content to HTML"""
-    try:
-        html_content = ""
+                page_html += "</div>\n"
+                html_content += page_html
 
-        for page_index, page in enumerate(pages_content, 1):
-            page_html = f'<div class="page" id="page-{page_index}">\n'
-            page_html += f'<h2>Page {page_index}</h2>\n'
+            final_html = self.html_template.format(content=html_content)
 
-            # Add text lines
-            for text_line in page.get("text", []):
-                page_html += f'<div class="text-line">{self._safe_escape(text_line)}</div>\n'
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(final_html)
+            print(f"HTML file successfully saved at: {output_path}")
 
-            # Add tables
-            for table_index, table in enumerate(page.get("tables", []), 1):
-                if not table:
-                    continue
-                page_html += f"<h3>Table {table_index}</h3>\n<table>\n"
-                for row in table:
-                    page_html += "<tr>\n"
-                    for cell in row:
-                        page_html += f"<td>{self._safe_escape(cell)}</td>\n"
-                    page_html += "</tr>\n"
-                page_html += "</table>\n"
+        except Exception as e:
+            print(f"Unexpected error in HTML conversion: {e}")
+            traceback.print_exc()
 
-            # Add images
-            for img_index, img in enumerate(page.get("images", [])):
-                page_html += f'<img src="{img}" alt="Image {img_index + 1} on Page {page_index}">\n'
-
-            page_html += "</div>\n"
-            html_content += page_html
-
-        final_html = self.html_template.format(content=html_content)
-
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(final_html)
-        print(f"HTML file successfully saved at: {output_path}")
-
-    except Exception as e:
-        print(f"Unexpected error in HTML conversion: {e}")
-        traceback.print_exc()
-
-def process_pdf(self, pdf_path: str, output_path: str):
-    """Full PDF processing workflow"""
-    try:
-        print("Starting PDF extraction...")
-        pages_content = self.extract_content(pdf_path)
-        if not pages_content:
-            print("No content extracted from PDF.")
-            return
-        print("Converting content to HTML...")
-        self.convert_to_html(pages_content, output_path)
-        print("PDF to HTML conversion completed successfully!")
-    except Exception as e:
-        print(f"Critical error processing PDF: {e}")
-        traceback.print_exc()
+    def process_pdf(self, pdf_path: str, output_path: str):
+        """Full PDF processing workflow"""
+        try:
+            print("Starting PDF extraction...")
+            pages_content = self.extract_content(pdf_path)
+            if not pages_content:
+                print("No content extracted from PDF.")
+                return
+            print("Converting content to HTML...")
+            self.convert_to_html(pages_content, output_path)
+            print("PDF to HTML conversion completed successfully!")
+        except Exception as e:
+            print(f"Critical error processing PDF: {e}")
+            traceback.print_exc()
 
 
 # Replace with your actual Azure credentials
